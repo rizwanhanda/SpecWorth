@@ -2,8 +2,10 @@
 import unittest
 from unittest.mock import patch
 
+from matplotlib.figure import Figure
+
 from app import briefing, configure, main, st
-from explanations import feature_values, ranked_features, waterfall_png
+from explanations import draw_step, feature_values, ranked_features, waterfall_png
 from pricing import explain, load_bundle
 
 
@@ -36,6 +38,19 @@ class PricingTests(unittest.TestCase):
         for limit in (7, len(totals)):
             image = waterfall_png(base, price, totals, labels, limit)
             self.assertTrue(image.startswith(b"\x89PNG"))
+
+    def test_arrows_end_at_exact_running_price(self):
+        axis = Figure().subplots()
+        for start, end in [(100, 110), (110, 110.02), (110.02, 98), (98, 97.99)]:
+            with self.subTest(start=start, end=end):
+                draw_step(axis, start, end, 2, "blue", max_head=2)
+                vertices = axis.patches[-1].get_xy()
+                self.assertEqual(tuple(vertices[3]), (end, 2))
+                self.assertEqual(vertices[:, 0].min(), min(start, end))
+                self.assertEqual(vertices[:, 0].max(), max(start, end))
+        draw_step(axis, 100, 100, 2, "blue", max_head=2)
+        self.assertEqual(len(axis.patches), 4)
+        self.assertEqual(axis.lines[-1].get_marker(), "|")
 
     def test_app_views_without_credentials(self):
         with patch.object(st, "secrets", {}), patch.object(st, "segmented_control",

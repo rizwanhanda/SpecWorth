@@ -4,11 +4,13 @@ from textwrap import shorten
 
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.patches import Polygon
 from matplotlib.ticker import MaxNLocator, StrMethodFormatter
 
 from pricing import FEATURES
 
-INK, MUTED, TEAL, RUST = "#153735", "#526763", "#087b70", "#ae542e"
+SURFACE, INK, MUTED = "#FCFCFF", "#171A35", "#535B76"
+POSITIVE, NEGATIVE = "#5147C5", "#A3452B"
 UNITS = {"Clock speed": "GHz", "Weight": "kg", "Memory": "GB", "Hard-drive storage": "GB",
          "Solid-state storage": "GB", "Screen size": "in", "Pixel density": "ppi",
          "Horizontal pixels": "px", "Vertical pixels": "px"}
@@ -37,6 +39,24 @@ def ranked_features(detail):
     return totals.reindex(totals.abs().sort_values(ascending=False).index)
 
 
+def signed_euros(amount):
+    if round(amount, 2) == 0:
+        return "€0.00"
+    sign = "+" if amount > 0 else "−"
+    return f"{sign}€{abs(amount):,.2f}"
+
+
+def draw_step(ax, start, end, row, color, max_head):
+    if start == end:
+        ax.plot(start, row, marker="|", color=MUTED, markersize=10, zorder=3)
+        return
+    direction = 1 if end > start else -1
+    shoulder = end - direction * min(abs(end - start) * .5, max_head)
+    points = [(start, row - .18), (shoulder, row - .18), (shoulder, row - .29),
+              (end, row), (shoulder, row + .29), (shoulder, row + .18), (start, row + .18)]
+    ax.add_patch(Polygon(points, color=color, linewidth=0, zorder=3))
+
+
 def waterfall_png(baseline, price, totals, labels, limit=7):
     visible = list(totals.iloc[:limit].items())
     if len(totals) > limit:
@@ -49,41 +69,46 @@ def waterfall_png(baseline, price, totals, labels, limit=7):
         running += impact
     steps.append(("Estimated price", price, price, True))
 
-    fig = Figure(figsize=(9.2, 0.54 * len(steps) + .8), dpi=155, facecolor="#ffffff")
+    fig = Figure(figsize=(9.2, 0.46 * len(steps) + .65), dpi=155, facecolor=SURFACE)
     FigureCanvasAgg(fig)
     left, bars, amounts = fig.subplots(1, 3, gridspec_kw={"width_ratios": [2.1, 3.8, 1.05]})
-    fig.subplots_adjust(left=.025, right=.98, top=.965, bottom=.10, wspace=.025)
+    fig.subplots_adjust(left=.025, right=.975, top=.965, bottom=.42 / fig.get_figheight(), wspace=.04)
     for ax in (left, bars, amounts):
-        ax.set_ylim(len(steps)-.43, -.55)
+        ax.set_facecolor(SURFACE)
+        ax.set_ylim(len(steps) - .44, -.54)
         ax.set_yticks([])
         ax.spines[:].set_visible(False)
     for ax in (left, amounts):
         ax.set_xlim(0, 1)
         ax.set_xticks([])
     endpoints = [value for _, a, b, _ in steps for value in (a, b)]
-    padding = max(18, (max(endpoints)-min(endpoints))*.1)
-    bars.set_xlim(min(endpoints)-padding, max(endpoints)+padding)
+    span = max(endpoints) - min(endpoints)
+    padding = max(10, span * .08)
+    bars.set_xlim(min(endpoints) - padding, max(endpoints) + padding)
+    max_head = .025 * (span + 2 * padding)
     bars.xaxis.set_major_locator(MaxNLocator(nbins=4))
     bars.xaxis.set_major_formatter(StrMethodFormatter("€{x:,.0f}"))
     bars.tick_params(axis="x", labelsize=9, colors=MUTED, length=0, pad=7)
-    bars.grid(axis="x", color="#e4ece9", linewidth=.8)
+    bars.grid(axis="x", color="#E6E8F4", linewidth=.8)
     bars.set_axisbelow(True)
     for i, (name, a, b, endpoint) in enumerate(steps):
-        color = INK if endpoint else (TEAL if b >= a else RUST)
+        color = INK if endpoint else POSITIVE if b > a else NEGATIVE if b < a else MUTED
         left.text(0, i-.10 if name in labels else i, name, color=INK, va="center",
                   fontsize=11, weight="bold" if endpoint else "medium")
         if name in labels:
             left.text(0, i+.24, shorten(labels[name], width=27, placeholder="…"),
                       va="center", color=MUTED, fontsize=8.4)
-        if endpoint:
-            bars.scatter(b, i, s=77, color=INK, zorder=4)
+        if i == 0:
+            bars.scatter(b, i, s=67, facecolor=SURFACE, edgecolor=INK, linewidth=1.65, zorder=4)
+        elif endpoint:
+            bars.scatter(b, i, s=62, marker="D", color=INK, zorder=4)
         else:
-            bars.barh(i, b-a, left=a, height=.46, color=color, zorder=3)
+            draw_step(bars, a, b, i, color, max_head)
         if i < len(steps)-1:
-            bars.plot([b, b], [i+.12, i+.84], color="#869c96", lw=1, ls=":", zorder=2)
-        label = f"€{b:,.2f}" if endpoint else f"{'+' if b >= a else '−'}€{abs(b-a):,.2f}"
+            bars.plot([b, b], [i, i + 1], color="#757E9D", lw=1, ls=":", zorder=2)
+        label = f"€{b:,.2f}" if endpoint else signed_euros(b - a)
         amounts.text(1, i, label, ha="right", va="center", fontsize=11, color=color,
                      weight="bold" if endpoint else "medium")
     image = BytesIO()
-    fig.savefig(image, format="png", facecolor="white")
+    fig.savefig(image, format="png")
     return image.getvalue()

@@ -9,7 +9,7 @@ from google.genai import errors, types
 from httpx2 import RequestError
 from streamlit.errors import StreamlitSecretNotFoundError
 
-from explanations import feature_values, ranked_features, waterfall_png
+from explanations import POSITIVE, feature_values, ranked_features, signed_euros, waterfall_png
 from pricing import explain, load_bundle
 
 GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -24,25 +24,25 @@ def configure(catalog):
         return st.selectbox(label, options, index=options.index(default))
 
     with st.sidebar:
-        st.header("Configuration")
-        st.subheader("Device")
-        brand = choose("Brand", "Company", "Dell")
-        chassis = choose("Form factor", "TypeName", "Notebook")
-        os_name = choose("Operating system", "OpSys", "Windows 10")
-        lo, hi = catalog["weight_range"]
-        weight = st.number_input("Weight (kg)", lo, hi, 2.04, 0.01)
-        st.subheader("Hardware")
-        cpus, gpus = sorted(catalog["cpus"]), sorted(catalog["gpus"])
-        cpu = st.selectbox("Processor", cpus, index=cpus.index("Intel Core i5 7200U 2.5GHz"))
-        gpu = st.selectbox("Graphics", gpus, index=gpus.index("Intel HD Graphics 620"))
-        ram = choose("Memory (GB)", "Ram", 8)
-        ssd = choose("SSD or flash storage (GB)", "SSD_GB", 256)
-        hdd = choose("HDD or hybrid storage (GB)", "HDD_GB", 0)
-        st.subheader("Display")
-        inches = choose("Diagonal (inches)", "Inches", 15.6)
-        resolution = choose("Resolution", "Resolution", "1920x1080")
-        ips = st.toggle("IPS panel", value=True)
-        touch = st.toggle("Touchscreen")
+        st.header("Laptop specs", anchor=False)
+        with st.expander("Performance & storage", icon=":material/memory:", expanded=True):
+            cpus, gpus = sorted(catalog["cpus"]), sorted(catalog["gpus"])
+            cpu = st.selectbox("Processor", cpus, index=cpus.index("Intel Core i5 7200U 2.5GHz"))
+            gpu = st.selectbox("Graphics", gpus, index=gpus.index("Intel HD Graphics 620"))
+            ram = choose("Memory (GB)", "Ram", 8)
+            ssd = choose("SSD or flash storage (GB)", "SSD_GB", 256)
+            hdd = choose("HDD or hybrid storage (GB)", "HDD_GB", 0)
+        with st.expander("Device", icon=":material/laptop_windows:"):
+            brand = choose("Brand", "Company", "Dell")
+            chassis = choose("Form factor", "TypeName", "Notebook")
+            os_name = choose("Operating system", "OpSys", "Windows 10")
+            lo, hi = catalog["weight_range"]
+            weight = st.number_input("Weight (kg)", lo, hi, 2.04, 0.01)
+        with st.expander("Display", icon=":material/desktop_windows:"):
+            inches = choose("Diagonal (inches)", "Inches", 15.6)
+            resolution = choose("Resolution", "Resolution", "1920x1080")
+            ips = st.toggle("IPS panel", value=True)
+            touch = st.toggle("Touchscreen")
     a, b = map(int, resolution.split("x"))
     return dict(Company=brand, TypeName=chassis, OpSys=os_name, Weight=weight,
                 Cpu_Model=cpu, Gpu_Model=gpu, Gpu_Brand=catalog["gpus"][gpu],
@@ -57,9 +57,32 @@ def render_waterfall(baseline, price, totals, labels, limit):
 
 
 def show_explanation(row, price, baseline, detail, catalog):
-    st.header("Inside the estimate")
-    st.write("Start at the model baseline and follow the bars to the price. Teal adds euros. "
-             "Copper subtracts them. Each amount is specific to the selected laptop.")
+    totals = ranked_features(detail)
+    labels = feature_values(row, detail)
+    reference = catalog["audit"]["reference"]
+    with st.container(border=True):
+        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            st.header("Price breakdown", anchor=False)
+            view = st.segmented_control(
+                "Explanation view", ["This laptop", "Across laptops"], default="This laptop",
+                required=True, label_visibility="collapsed",
+            )
+        if view == "Across laptops":
+            st.caption(f"Average absolute SHAP contribution across {catalog['test_rows']} held-out "
+                       "laptops. The bars show how much each feature moved prices in either direction.")
+            ranking = pd.DataFrame([{"Feature": name, "Average impact (€)": value["mean_abs"]}
+                                    for name, value in reference.items()]).sort_values("Average impact (€)", ascending=False)
+            st.bar_chart(ranking, x="Feature", y="Average impact (€)", horizontal=True,
+                         sort=False, color=POSITIVE, height=480,
+                         alt="Features ranked by their average absolute contribution to held-out prices.")
+        else:
+            with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+                st.caption("SHAP waterfall · ← Lowers the estimate · Raises the estimate →")
+                full = st.toggle("Show every feature", value=False, key="waterfall_all")
+            largest = f"{totals.index[0]} at {signed_euros(totals.iloc[0])}"
+            st.image(render_waterfall(baseline, price, totals, labels, len(totals) if full else 7),
+                     width="stretch", alt=f"SHAP waterfall from €{baseline:,.2f} to €{price:,.2f}. "
+                     f"The largest absolute contribution is {largest}.")
     with st.expander("How does SHAP assign the euros?"):
         st.write("Imagine revealing the specs one at a time. The change attributed to RAM can "
                  "depend on whether the processor and storage are already known. TreeSHAP "
@@ -67,32 +90,12 @@ def show_explanation(row, price, baseline, detail, catalog):
                  "and their training-path statistics. We sum the indicators for each feature, "
                  "so all brand indicators appear together as Brand. The baseline plus every "
                  "feature contribution recovers the prediction, up to rounding.")
-    totals = ranked_features(detail)
-    labels = feature_values(row, detail)
-    reference = catalog["audit"]["reference"]
-    view = st.segmented_control("Explanation view", ["This laptop", "Across laptops"],
-                                default="This laptop", selection_mode="single")
-    if view == "Across laptops":
-        st.subheader("Which features usually move the price?")
-        st.caption(f"Mean absolute SHAP contribution across the {catalog['test_rows']} held-out laptops. "
-                   "Larger amounts indicate a stronger average influence in either direction.")
-        ranking = pd.DataFrame([{"Feature": name, "Average impact (€)": value["mean_abs"]}
-                                for name, value in reference.items()]).sort_values("Average impact (€)", ascending=False)
-        st.bar_chart(ranking, x="Feature", y="Average impact (€)", horizontal=True,
-                     sort=False, color="#087b70", height=480,
-                     alt="Features ranked by their average absolute contribution to held-out prices.")
-    else:
-        st.subheader("From baseline to this laptop")
-        full = st.toggle("Show every feature", value=False)
-        st.image(render_waterfall(baseline, price, totals, labels, len(totals) if full else 7),
-                 width="stretch", alt=f"SHAP waterfall from €{baseline:,.2f} to €{price:,.2f}. "
-                 f"The largest absolute contribution is {totals.index[0]} at {totals.iloc[0]:+,.2f} euros.")
     field = st.selectbox("Inspect a feature", totals.index.tolist())
     impact = totals[field]
     stats = reference[field]
-    st.write(f"**{field} · {labels[field]}** contributes **{impact:+,.2f} €** to this prediction. "
-             f"The middle 80% of held-out laptops had contributions for this feature between "
-             f"€{stats['low']:,.2f} and €{stats['high']:,.2f}.")
+    st.write(f"**{field} · {labels[field]}** · **{signed_euros(impact)}** in this estimate.")
+    st.caption(f"Middle 80% of held-out contributions for {field.lower()} · "
+               f"{signed_euros(stats['low'])} to {signed_euros(stats['high'])}")
     with st.expander("See the underlying model inputs"):
         subset = detail.loc[detail.Feature.eq(field), ["Indicator", "Input", "SHAP (€)"]].copy()
         if subset.Indicator.ne("").any():
@@ -151,19 +154,21 @@ def briefing(row, price, baseline, impacts):
 
 
 def main():
-    st.set_page_config(page_title="Laptop price estimator", page_icon="💻", layout="wide")
+    st.set_page_config(page_title="SpecWorth", page_icon=":material/laptop_windows:", layout="wide")
     model, catalog = cached_bundle()
     row = configure(catalog)
     price, baseline, impacts, aligned, detail = explain(model, catalog, row)
-    st.title("Laptop price estimator")
-    st.caption(f"{row['Company']} {row['TypeName'].lower()} · {row['Cpu_Model']} · "
-               f"{row['Ram']} GB RAM · {row['Gpu_Model']}")
-    price_card, reference, error = st.columns(3)
-    price_card.metric("Estimated catalog price", f"€{price:,.2f}", f"{price-baseline:+,.2f} € vs baseline", border=True)
-    reference.metric("Model baseline", f"€{baseline:,.2f}", border=True,
+    st.title("SpecWorth", anchor=False)
+    st.caption(f"Laptop price estimator · {row['Company']} {row['TypeName'].lower()} · "
+               f"{row['Ram']} GB RAM · {row['Cpu_Model']}")
+    price_card, reference, error = st.columns([1.5, 1, 1])
+    price_card.metric("Estimated catalog price", f"€{price:,.2f}",
+                      f"{signed_euros(price - baseline)} vs. baseline", delta_color="off",
+                      delta_arrow="off", border=True, height="stretch")
+    reference.metric("Model baseline", f"€{baseline:,.2f}", border=True, height="stretch",
                      help="The starting value for the model’s feature contributions.")
     error.metric("Average test error", f"€{catalog['metrics']['mae']:,.0f}", border=True,
-                 help="Mean absolute error on held-out catalog configurations. Individual errors vary.")
+                 height="stretch", help="Mean absolute error on held-out catalog configurations. Individual errors vary.")
     show_explanation(row, price, baseline, detail, catalog)
     with st.expander("Model and evaluation"):
         st.write(f"The catalog contains {catalog['rows']:,} laptops. We held out {catalog['test_rows']} "

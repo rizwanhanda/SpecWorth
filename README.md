@@ -1,4 +1,4 @@
-# Laptop price estimator
+# SpecWorth
 
 Configure a laptop to estimate its catalog price in euros and explore the prediction with TreeSHAP. The default Dell notebook lands at €1,037.73, starting from a model baseline of €1,108.02.
 
