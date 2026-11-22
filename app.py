@@ -56,9 +56,7 @@ def render_waterfall(baseline, price, totals, labels, limit):
     return waterfall_png(baseline, price, totals, labels, limit)
 
 
-def show_explanation(row, price, baseline, detail, catalog):
-    totals = ranked_features(detail)
-    labels = feature_values(row, detail)
+def show_explanation(price, baseline, totals, labels, catalog):
     reference = catalog["audit"]["reference"]
     with st.container(border=True):
         with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
@@ -80,9 +78,13 @@ def show_explanation(row, price, baseline, detail, catalog):
                 st.caption("SHAP waterfall · ← Lowers the estimate · Raises the estimate →")
                 full = st.toggle("Show every feature", value=False, key="waterfall_all")
             largest = f"{totals.index[0]} at {signed_euros(totals.iloc[0])}"
-            st.image(render_waterfall(baseline, price, totals, labels, len(totals) if full else 7),
-                     width="stretch", alt=f"SHAP waterfall from €{baseline:,.2f} to €{price:,.2f}. "
-                     f"The largest absolute contribution is {largest}.")
+            with st.container(horizontal=True, horizontal_alignment="center"):
+                st.image(render_waterfall(baseline, price, totals, labels, len(totals) if full else 7),
+                         width=980, alt=f"SHAP waterfall from €{baseline:,.2f} to €{price:,.2f}. "
+                         f"The largest absolute contribution is {largest}.")
+
+
+def show_feature_details(detail, totals, labels, reference):
     with st.expander("How does SHAP assign the euros?"):
         st.write("Imagine revealing the specs one at a time. The change attributed to RAM can "
                  "depend on whether the processor and storage are already known. TreeSHAP "
@@ -108,40 +110,70 @@ def show_explanation(row, price, baseline, detail, catalog):
                "upgrade, compare the two full predictions.")
 
 
-def generate_briefing(key, facts):
-    prompt = ("Write two short plain-text paragraphs for a laptop buyer. Explain the catalog "
-              "estimate using the supplied figures and largest grouped contributions. "
-              "Keep the figures in euros. These are model associations. Avoid claims about "
-              "upgrade costs, current retail prices, performance benchmarks or discounts.\n")
+def generate_takeaway(key, specs):
+    prompt = ("Write one plain-English sentence of at most 30 words suggesting what a laptop "
+              "buyer should compare in current listings. Use only the supplied specs. "
+              "Avoid price figures, claims about performance or value, and buy or skip advice. "
+              "Return just the sentence.\n")
     with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=20000)) as client:
-        result = client.models.generate_content(model=GEMINI_MODEL, contents=prompt + json.dumps(facts))
-    return (result.text or "").strip()
+        result = client.models.generate_content(model=GEMINI_MODEL, contents=prompt + json.dumps(specs))
+    text = (result.text or "").strip()
+    if "\n" not in text and len(text.split()) <= 30:
+        return text
+    return ""
 
 
-def briefing(row, price, baseline, impacts):
-    st.subheader("Buyer’s briefing")
-    st.caption("Generate a short explanation with Gemini. This sends the selected specs and model results to Google.")
+def briefing(row, price, baseline, totals, labels, catalog):
+    difference = round(price - baseline, 2)
+    if difference:
+        direction = "above" if difference > 0 else "below"
+        comparison = f"€{abs(difference):,.2f} {direction} the €{baseline:,.2f} model baseline."
+    else:
+        comparison = f"Matches the €{baseline:,.2f} model baseline."
+    displayed = totals[totals.map(signed_euros).ne("€0.00")]
+    with st.container(border=True):
+        st.subheader("Buyer’s briefing", anchor=False)
+        st.markdown(f"**€{price:,.2f} estimated catalog price** · {comparison}")
+        raised, lowered = st.columns(2)
+        for column, heading, drivers in (
+            (raised, "Raised the estimate", displayed[displayed.gt(0)]),
+            (lowered, "Lowered the estimate", displayed[displayed.lt(0)]),
+        ):
+            with column:
+                st.markdown(f"**{heading}**")
+                if drivers.empty:
+                    st.caption("No contributions to the nearest cent.")
+                else:
+                    st.markdown("\n".join(
+                        f"- {name} · {labels[name]} · **{signed_euros(amount)}**"
+                        for name, amount in drivers.head(2).items()
+                    ))
+        st.markdown("**How to use it**")
+        st.write(f"The model was off by about **€{catalog['metrics']['mae']:,.0f} on average** across "
+                 f"{catalog['test_rows']} test laptops. Use the estimate as a starting point, "
+                 "then compare current listings with the same processor, memory, and storage.")
+        show_optional_takeaway(row, labels)
+
+
+def show_optional_takeaway(row, labels):
     try:
         key = st.secrets.get("GEMINI_API_KEY", "").strip()
     except StreamlitSecretNotFoundError:
         key = ""
     if not key:
-        st.info("Set GEMINI_API_KEY in Streamlit secrets to enable the briefing.")
         return
-    facts = dict(configuration=row, estimate_eur=round(price, 2), baseline_eur=round(baseline, 2),
-                 contributions_eur={name: round(value, 2) for name, value in impacts.items()})
-    signature = json.dumps(facts, sort_keys=True)
-    if st.session_state.get("briefing_signature") != signature:
-        st.session_state.pop("briefing_text", None)
-        st.session_state["briefing_signature"] = signature
-    if st.button("Generate briefing", type="primary"):
+    signature = json.dumps(row, sort_keys=True)
+    if st.session_state.get("takeaway_signature") != signature:
+        st.session_state.pop("takeaway_text", None)
+        st.session_state["takeaway_signature"] = signature
+    if st.button("Get a comparison tip with Gemini", help="Sends the selected laptop specs to Google."):
         try:
-            with st.spinner("Writing briefing…"):
-                response = generate_briefing(key, facts)
+            with st.spinner("Writing comparison tip…"):
+                response = generate_takeaway(key, labels)
             if response:
-                st.session_state["briefing_text"] = response
+                st.session_state["takeaway_text"] = response
             else:
-                st.warning("Gemini returned an empty briefing. Try again.")
+                st.warning("Gemini did not return a short comparison tip. Try again.")
         except errors.APIError as error:
             if error.code == 429:
                 st.warning("Gemini’s request limit was reached. Try again later.")
@@ -149,7 +181,7 @@ def briefing(row, price, baseline, impacts):
                 st.error("Gemini could not complete the request. Check the API key and model access.")
         except (RequestError, TimeoutError):
             st.warning("Google could not be reached. Try again in a moment.")
-    if text := st.session_state.get("briefing_text"):
+    if text := st.session_state.get("takeaway_text"):
         st.text(text)
 
 
@@ -157,7 +189,9 @@ def main():
     st.set_page_config(page_title="SpecWorth", page_icon=":material/laptop_windows:", layout="wide")
     model, catalog = cached_bundle()
     row = configure(catalog)
-    price, baseline, impacts, aligned, detail = explain(model, catalog, row)
+    price, baseline, _, aligned, detail = explain(model, catalog, row)
+    totals = ranked_features(detail)
+    labels = feature_values(row, detail)
     st.title("SpecWorth", anchor=False)
     st.caption(f"Laptop price estimator · {row['Company']} {row['TypeName'].lower()} · "
                f"{row['Ram']} GB RAM · {row['Cpu_Model']}")
@@ -169,7 +203,9 @@ def main():
                      help="The starting value for the model’s feature contributions.")
     error.metric("Average test error", f"€{catalog['metrics']['mae']:,.0f}", border=True,
                  height="stretch", help="Mean absolute error on held-out catalog configurations. Individual errors vary.")
-    show_explanation(row, price, baseline, detail, catalog)
+    show_explanation(price, baseline, totals, labels, catalog)
+    briefing(row, price, baseline, totals, labels, catalog)
+    show_feature_details(detail, totals, labels, catalog["audit"]["reference"])
     with st.expander("Model and evaluation"):
         st.write(f"The catalog contains {catalog['rows']:,} laptops. We held out {catalog['test_rows']} "
                  "rows and kept configurations with matching broad hardware specs in the same split. "
@@ -184,8 +220,6 @@ def main():
         }).round(2), hide_index=True)
         st.caption(f"Encoded model inputs · {aligned.shape[1]} columns")
         st.dataframe(aligned, hide_index=True, width="stretch")
-    st.divider()
-    briefing(row, price, baseline, impacts)
 
 
 if __name__ == "__main__":
