@@ -11,6 +11,7 @@ from pricing import FEATURES
 
 SURFACE, INK, MUTED = "#FCFCFF", "#171A35", "#535B76"
 POSITIVE, NEGATIVE = "#5147C5", "#A3452B"
+ESTIMATE_SURFACE = "#F0F0FC"
 UNITS = {"Clock speed": "GHz", "Weight": "kg", "Memory": "GB", "Hard-drive storage": "GB",
          "Solid-state storage": "GB", "Screen size": "in", "Pixel density": "ppi",
          "Horizontal pixels": "px", "Vertical pixels": "px"}
@@ -69,21 +70,22 @@ def waterfall_png(baseline, price, totals, labels, limit=7):
         running += impact
     steps.append(("Estimated price", price, price, True))
 
-    fig = Figure(figsize=(9.2, 0.46 * len(steps) + .65), dpi=155, facecolor=SURFACE)
+    fig = Figure(figsize=(9.2, 0.40 * len(steps) + .55), dpi=155, facecolor=SURFACE)
     FigureCanvasAgg(fig)
-    left, bars, amounts = fig.subplots(1, 3, gridspec_kw={"width_ratios": [2.1, 3.8, 1.05]})
-    fig.subplots_adjust(left=.025, right=.975, top=.965, bottom=.42 / fig.get_figheight(), wspace=.04)
+    left, bars, amounts = fig.subplots(1, 3, gridspec_kw={"width_ratios": [1.85, 4.3, .85]})
+    fig.subplots_adjust(left=.025, right=.975, top=.965, bottom=.36 / fig.get_figheight(), wspace=.015)
     for ax in (left, bars, amounts):
         ax.set_facecolor(SURFACE)
         ax.set_ylim(len(steps) - .44, -.54)
         ax.set_yticks([])
         ax.spines[:].set_visible(False)
+        ax.axhspan(len(steps) - 1.38, len(steps) - .62, color=ESTIMATE_SURFACE, linewidth=0)
     for ax in (left, amounts):
         ax.set_xlim(0, 1)
         ax.set_xticks([])
     endpoints = [value for _, a, b, _ in steps for value in (a, b)]
     span = max(endpoints) - min(endpoints)
-    padding = max(10, span * .08)
+    padding = max(6, span * .05)
     bars.set_xlim(min(endpoints) - padding, max(endpoints) + padding)
     max_head = .025 * (span + 2 * padding)
     bars.xaxis.set_major_locator(MaxNLocator(nbins=4))
@@ -93,21 +95,22 @@ def waterfall_png(baseline, price, totals, labels, limit=7):
     bars.set_axisbelow(True)
     for i, (name, a, b, endpoint) in enumerate(steps):
         color = INK if endpoint else POSITIVE if b > a else NEGATIVE if b < a else MUTED
-        left.text(0, i-.10 if name in labels else i, name, color=INK, va="center",
-                  fontsize=11, weight="bold" if endpoint else "medium")
+        font_size = 12 if i == len(steps) - 1 else 11
+        left.text(.025, i-.13 if name in labels else i, name, color=INK, va="center",
+                  fontsize=font_size, weight="bold" if endpoint else "medium")
         if name in labels:
-            left.text(0, i+.24, shorten(labels[name], width=27, placeholder="…"),
+            left.text(.025, i+.24, shorten(labels[name], width=27, placeholder="…"),
                       va="center", color=MUTED, fontsize=8.4)
         if i == 0:
             bars.scatter(b, i, s=67, facecolor=SURFACE, edgecolor=INK, linewidth=1.65, zorder=4)
         elif endpoint:
-            bars.scatter(b, i, s=62, marker="D", color=INK, zorder=4)
+            bars.scatter(b, i, s=74, marker="D", color=POSITIVE, zorder=4)
         else:
             draw_step(bars, a, b, i, color, max_head)
         if i < len(steps)-1:
             bars.plot([b, b], [i, i + 1], color="#757E9D", lw=1, ls=":", zorder=2)
         label = f"€{b:,.2f}" if endpoint else signed_euros(b - a)
-        amounts.text(1, i, label, ha="right", va="center", fontsize=11, color=color,
+        amounts.text(.94, i, label, ha="right", va="center", fontsize=font_size, color=color,
                      weight="bold" if endpoint else "medium")
     image = BytesIO()
     fig.savefig(image, format="png")
