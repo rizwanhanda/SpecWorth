@@ -1,0 +1,25 @@
+# Secrets and local environments
+.streamlit/secrets.toml
+.env
+.env.*
+*.env
+
+# Python and editors
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Offline training and superseded artifacts
+/laptop_price.csv
+/tune_and_evaluate.py
+/model.pkl
+/features.pkl
