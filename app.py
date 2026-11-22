@@ -1,18 +1,13 @@
 """Streamlit entry point for the laptop catalog price estimator."""
-import json
 import math
 
 import pandas as pd
 import streamlit as st
-from google import genai
-from google.genai import errors, types
-from httpx2 import RequestError
-from streamlit.errors import StreamlitSecretNotFoundError
 
+from buyer_report import listing_inputs, show_report
 from explanations import POSITIVE, feature_values, ranked_features, signed_euros, waterfall_png
 from pricing import explain, load_bundle
 
-GEMINI_MODEL = "gemini-3.5-flash-lite"
 cached_bundle = st.cache_resource(load_bundle)
 
 
@@ -110,79 +105,29 @@ def show_feature_details(detail, totals, labels, reference):
                "upgrade, compare the two full predictions.")
 
 
-def generate_takeaway(key, specs):
-    prompt = ("Write one plain-English sentence of at most 30 words suggesting what a laptop "
-              "buyer should compare in current listings. Use only the supplied specs. "
-              "Avoid price figures, claims about performance or value, and buy or skip advice. "
-              "Return just the sentence.\n")
-    with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=20000)) as client:
-        result = client.models.generate_content(model=GEMINI_MODEL, contents=prompt + json.dumps(specs))
-    text = (result.text or "").strip()
-    if "\n" not in text and len(text.split()) <= 30:
-        return text
-    return ""
-
-
-def briefing(row, price, baseline, totals, labels, catalog):
-    difference = round(price - baseline, 2)
-    if difference:
-        direction = "above" if difference > 0 else "below"
-        comparison = f"€{abs(difference):,.2f} {direction} the €{baseline:,.2f} model baseline."
-    else:
-        comparison = f"Matches the €{baseline:,.2f} model baseline."
-    displayed = totals[totals.map(signed_euros).ne("€0.00")]
-    with st.container(border=True):
-        st.subheader("Buyer’s briefing", anchor=False)
-        st.markdown(f"**€{price:,.2f} estimated catalog price** · {comparison}")
-        raised, lowered = st.columns(2)
-        for column, heading, drivers in (
-            (raised, "Raised the estimate", displayed[displayed.gt(0)]),
-            (lowered, "Lowered the estimate", displayed[displayed.lt(0)]),
-        ):
-            with column:
-                st.markdown(f"**{heading}**")
-                if drivers.empty:
-                    st.caption("No contributions to the nearest cent.")
-                else:
-                    st.markdown("\n".join(
-                        f"- {name} · {labels[name]} · **{signed_euros(amount)}**"
-                        for name, amount in drivers.head(2).items()
-                    ))
-        st.markdown("**How to use it**")
-        st.write(f"The model was off by about **€{catalog['metrics']['mae']:,.0f} on average** across "
-                 f"{catalog['test_rows']} test laptops. Use the estimate as a starting point, "
-                 "then compare current listings with the same processor, memory, and storage.")
-        show_optional_takeaway(row, labels)
-
-
-def show_optional_takeaway(row, labels):
-    try:
-        key = st.secrets.get("GEMINI_API_KEY", "").strip()
-    except StreamlitSecretNotFoundError:
-        key = ""
-    if not key:
+def show_model_error(catalog):
+    errors = catalog["audit"].get("absolute_errors_eur")
+    if not errors:
         return
-    signature = json.dumps(row, sort_keys=True)
-    if st.session_state.get("takeaway_signature") != signature:
-        st.session_state.pop("takeaway_text", None)
-        st.session_state["takeaway_signature"] = signature
-    if st.button("Get a comparison tip with Gemini", help="Sends the selected laptop specs to Google."):
-        try:
-            with st.spinner("Writing comparison tip…"):
-                response = generate_takeaway(key, labels)
-            if response:
-                st.session_state["takeaway_text"] = response
-            else:
-                st.warning("Gemini did not return a short comparison tip. Try again.")
-        except errors.APIError as error:
-            if error.code == 429:
-                st.warning("Gemini’s request limit was reached. Try again later.")
-            else:
-                st.error("Gemini could not complete the request. Check the API key and model access.")
-        except (RequestError, TimeoutError):
-            st.warning("Google could not be reached. Try again in a moment.")
-    if text := st.session_state.get("takeaway_text"):
-        st.text(text)
+    frame = pd.DataFrame({
+        "Absolute error (€)": [0.0, *errors],
+        "Share of test laptops": [i / len(errors) for i in range(len(errors) + 1)],
+    }).groupby("Absolute error (€)", as_index=False).max()
+    st.subheader("How far off were the test predictions?", anchor=False)
+    st.caption(f"About 90% of the {len(errors)} held-out catalog predictions were within "
+               f"€{catalog['audit']['p90_error']:,.0f} of the recorded price. "
+               "This curve measures historical catalog errors. The current listing has its own condition and market.")
+    st.vega_lite_chart(frame, {
+        "mark": {"type": "line", "interpolate": "step-after", "color": POSITIVE, "strokeWidth": 2.5},
+        "height": 220,
+        "encoding": {
+            "x": {"field": "Absolute error (€)", "type": "quantitative"},
+            "y": {"field": "Share of test laptops", "type": "quantitative",
+                  "axis": {"format": ".0%"}, "scale": {"domain": [0, 1]}},
+            "tooltip": [{"field": "Absolute error (€)", "type": "quantitative", "format": ",.2f"},
+                        {"field": "Share of test laptops", "type": "quantitative", "format": ".0%"}],
+        },
+    }, width="stretch", alt="Cumulative share of held-out catalog laptops at each absolute euro error threshold.")
 
 
 def main():
@@ -193,7 +138,7 @@ def main():
     totals = ranked_features(detail)
     labels = feature_values(row, detail)
     st.title("SpecWorth", anchor=False)
-    st.caption(f"Laptop price estimator · {row['Company']} {row['TypeName'].lower()} · "
+    st.caption(f"Used laptop valuation · {row['Company']} {row['TypeName'].lower()} · "
                f"{row['Ram']} GB RAM · {row['Cpu_Model']}")
     price_card, reference, error = st.columns([1.5, 1, 1])
     price_card.metric("Estimated catalog price", f"€{price:,.2f}",
@@ -203,8 +148,9 @@ def main():
                      help="The starting value for the model’s feature contributions.")
     error.metric("Average test error", f"€{catalog['metrics']['mae']:,.0f}", border=True,
                  height="stretch", help="Mean absolute error on held-out catalog configurations. Individual errors vary.")
+    listing = listing_inputs()
     show_explanation(price, baseline, totals, labels, catalog)
-    briefing(row, price, baseline, totals, labels, catalog)
+    show_report(row, price, baseline, totals, labels, catalog, listing)
     show_feature_details(detail, totals, labels, catalog["audit"]["reference"])
     with st.expander("Model and evaluation"):
         st.write(f"The catalog contains {catalog['rows']:,} laptops. We held out {catalog['test_rows']} "
@@ -215,6 +161,7 @@ def main():
                  f"Holding out named products in a separate development-data check averaged "
                  f"€{audit['product_mae']:,.0f}. The 90th percentile absolute error on the main holdout "
                  f"was €{audit['p90_error']:,.0f}.")
+        show_model_error(catalog)
         st.dataframe(pd.DataFrame(audit["bands"]).rename(columns={
             "band": "Actual catalog price", "rows": "Laptops", "mae": "Mean absolute error (€)"
         }).round(2), hide_index=True)

@@ -1,12 +1,16 @@
 """Offline regression tests for the shipped bundle and explanations."""
+import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from matplotlib.figure import Figure
 
-from app import briefing, configure, main, show_optional_takeaway, st
+from app import configure, main, st
+from buyer_report import generate_strategy, show_gemini_report, show_report
 from explanations import draw_step, feature_values, ranked_features, waterfall_png
 from pricing import explain, load_bundle
+from valuation import CONDITIONS, WORKLOADS, hardware_fit, market_assessment, purchase_guidance
 
 
 class PricingTests(unittest.TestCase):
@@ -54,38 +58,88 @@ class PricingTests(unittest.TestCase):
 
     def test_app_views_without_credentials(self):
         with patch.object(st, "secrets", {}), patch.object(st, "segmented_control",
-                side_effect=["This laptop", "Across laptops"]), patch.object(st, "subheader") as heading, \
+                side_effect=["This laptop", "Across laptops"]), patch.object(st, "header") as heading, \
                 patch.object(st, "button") as button:
             main()
             main()
-            self.assertEqual(sum(call.args[0] == "Buyer’s briefing" for call in heading.call_args_list), 2)
+            self.assertEqual(sum(call.args[0] == "Pricing strategy report" for call in heading.call_args_list), 2)
             button.assert_not_called()
 
-    def test_briefing_matches_the_waterfall_without_gemini(self):
+    def test_used_report_matches_the_waterfall_and_comparables_without_gemini(self):
         row = dict(self.row, Weight=2.05)
         price, baseline, _, _, detail = explain(self.model, self.catalog, row)
+        listing = (300.0, CONDITIONS[1], WORKLOADS[0], [275.0, 310.0, 340.0], "Completed sale prices")
         with patch.object(st, "secrets", {}), patch.object(st, "markdown") as markdown, \
-                patch.object(st, "write") as write:
-            briefing(row, price, baseline, ranked_features(detail), feature_values(row, detail), self.catalog)
+                patch.object(st, "write") as write, patch.object(st, "subheader") as subheader:
+            show_report(row, price, baseline, ranked_features(detail), feature_values(row, detail), self.catalog, listing)
+        self.assertIn("Competitive against your comparisons", [call.args[0] for call in subheader.call_args_list])
         content = "\n".join(call.args[0] for call in markdown.call_args_list)
-        self.assertIn("€1,027.49 estimated catalog price", content)
-        self.assertIn("€80.53 below the €1,108.02 model baseline", content)
-        self.assertIn("Solid-state storage · 256 GB · **+€48.22**", content)
-        self.assertIn("IPS panel · Yes · **+€33.86**", content)
-        self.assertIn("Weight · 2.05 kg · **−€72.28**", content)
-        self.assertIn("Form factor · Notebook · **−€62.42**", content)
-        self.assertEqual(sum(line.startswith("- ") for line in content.splitlines()), 4)
-        self.assertIn("€191 on average", write.call_args.args[0])
-        self.assertIn("258 test laptops", write.call_args.args[0])
+        for expected in ("€300.00 asking price", "€1,027.49", "€1,108.02", "Solid-state storage · 256 GB · **+€48.22**",
+                         "IPS panel · Yes · **+€33.86**", "Weight · 2.05 kg · **−€72.28**",
+                         "Form factor · Notebook · **−€62.42**"):
+            self.assertIn(expected, content)
+        advice = "\n".join(call.args[0] for call in write.call_args_list)
+        self.assertIn("The median is €310.00.", advice)
+        self.assertIn("Suitable on paper for everyday work", advice)
 
-    def test_gemini_tip_stays_tied_to_configuration(self):
+    def test_market_verdict_is_based_on_comparable_used_prices(self):
+        comparisons = [280, 330, 300]
+        cases = [(None, comparisons, "Enter"), (100, comparisons[:2], "Used-market"),
+                 (240, comparisons, "Potentially good"), (280, comparisons, "Competitive"),
+                 (300, comparisons, "Competitive"), (330, comparisons, "Reasonable"),
+                 (360, comparisons, "Expensive")]
+        for ask, prices, expected in cases:
+            with self.subTest(ask=ask, prices=prices):
+                result = market_assessment(ask, prices, "Completed sale prices")
+                self.assertTrue(result.verdict.startswith(expected))
+        report = market_assessment(360, comparisons, "Asking prices")
+        self.assertIn("seller quotes", report.reason)
+        self.assertIn("€300.00", report.next_step)
+
+    def test_condition_and_workload_can_override_a_competitive_price(self):
+        office = hardware_fit(self.row, WORKLOADS[0])
+        gaming = hardware_fit(self.row, WORKLOADS[2])
+        self.assertTrue(office.suitable)
+        self.assertFalse(gaming.suitable)
+        self.assertIn("better fit", purchase_guidance(CONDITIONS[1], gaming)[0])
+        self.assertIn("inspection", purchase_guidance(CONDITIONS[0], office)[0])
+        self.assertIn("battery", purchase_guidance(CONDITIONS[2], office)[0])
+        self.assertIn("fault", purchase_guidance(CONDITIONS[3], gaming)[0])
+
+    def test_historical_error_curve_has_all_held_out_residuals(self):
+        errors = self.catalog["audit"]["absolute_errors_eur"]
+        self.assertEqual(len(errors), self.catalog["test_rows"])
+        self.assertEqual(errors, sorted(errors))
+        self.assertAlmostEqual(sum(errors) / len(errors), self.catalog["metrics"]["mae"], places=4)
+        threshold = self.catalog["audit"]["p90_error"]
+        coverage = sum(error <= threshold for error in errors) / len(errors)
+        self.assertAlmostEqual(coverage, .9, delta=1 / len(errors))
+
+    def test_gemini_report_stays_tied_to_the_listing(self):
+        body = {"valuation": "Price discussion", "hardware": "Hardware discussion", "strategy": "Purchase checks"}
         with patch.object(st, "secrets", {"GEMINI_API_KEY": "placeholder"}), \
              patch.object(st, "session_state", {}), patch.object(st, "button", side_effect=[True, False, False]), \
-             patch("app.generate_takeaway", return_value="Sample") as generate, patch.object(st, "text") as text:
-            for ram in (8, 8, 16):
-                show_optional_takeaway({"Ram": ram}, {"Memory": f"{ram} GB"})
-            generate.assert_called_once_with("placeholder", {"Memory": "8 GB"})
-            self.assertEqual(text.call_count, 2)
+             patch("buyer_report.generate_strategy", return_value=body) as generate, patch.object(st, "text") as text:
+            for ask in (300, 300, 310):
+                show_gemini_report({"asking": ask})
+            generate.assert_called_once_with("placeholder", {"asking": 300})
+            self.assertEqual(text.call_count, 6)
+
+    def test_gemini_cannot_insert_new_digits_or_currencies(self):
+        paragraph = ("Compare the seller’s offer with recent completed sales and ask for a battery report "
+                     "before agreeing to pay.")
+        good = {section: paragraph for section in ("valuation", "hardware", "strategy")}
+        with patch("buyer_report.genai.Client") as sdk:
+            send = sdk.return_value.__enter__.return_value.models.generate_content
+            send.side_effect = [
+                SimpleNamespace(text=json.dumps(good)),
+                SimpleNamespace(text=json.dumps(dict(good, strategy=paragraph + " Offer €50."))),
+                SimpleNamespace(text="Not JSON"),
+            ]
+            self.assertEqual(generate_strategy("placeholder", {}), good)
+            self.assertIsNone(generate_strategy("placeholder", {}))
+            self.assertIsNone(generate_strategy("placeholder", {}))
+            self.assertEqual(send.call_args.kwargs["config"].response_mime_type, "application/json")
 
 
 if __name__ == "__main__":
