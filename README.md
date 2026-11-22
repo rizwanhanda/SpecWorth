@@ -9,7 +9,7 @@ Configure a laptop to estimate its catalog price in euros and explore the predic
 - **This laptop** shows the seven largest feature contributions. The remaining contributions share one row. Select **Show every feature** to expand the chart.
 - **Inspect a feature** shows its selected value, signed contribution, and the middle 80% of contributions observed on held-out laptops. Open the underlying inputs to see which category indicators were active or absent.
 - **Across laptops** ranks features by their mean absolute contribution over the 258 held-out configurations. Use the sidebar to compare full predictions when evaluating a hardware change.
-- **Buyer’s briefing** uses the Google Gemini API when enabled. Clicking Generate sends the selected specs, estimated price, baseline, and component totals to Google.
+- **Buyer’s briefing** summarizes the estimate, highlights the strongest increases and decreases from the waterfall, and shows the average test error. The optional comparison tip sends the selected specs to Google Gemini.
 
 ## Model performance
 
@@ -33,8 +33,8 @@ python -m unittest -v test_pricing
 python -m streamlit run app.py
 ```
 
-For a Gemini briefing, set `GEMINI_API_KEY` in your local `.streamlit/secrets.toml`. The estimator and SHAP explorer work with the model archive alone and run locally.
+For the optional Gemini comparison tip, set `GEMINI_API_KEY` in your local `.streamlit/secrets.toml`. The estimator, SHAP explorer, and briefing run locally with the model archive.
 
 ## Deploy to Streamlit Community Cloud
 
-Select `app.py` as the entry point, choose Python 3.14 under Advanced settings, and enter `GEMINI_API_KEY` in the app’s Secrets settings if you want briefings. Keep the local secrets file private. The published project serves the model in `laptop_model.zip`. The training script and source catalog are kept in the original local workspace.
+Select `app.py` as the entry point, choose Python 3.14 under Advanced settings, and enter `GEMINI_API_KEY` in the app’s Secrets settings if you want the Gemini comparison tip. Keep the local secrets file private. The published project serves the model in `laptop_model.zip`. The training script and source catalog are kept in the original local workspace.
