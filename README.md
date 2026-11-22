@@ -11,7 +11,7 @@ Evaluate a used laptop listing. Compare the seller’s price with recent used pr
 - **This laptop** shows the seven largest feature contributions. The remaining contributions share one row. Select **Show every feature** to expand the chart.
 - **Inspect a feature** shows its selected value, signed contribution, and the middle 80% of contributions observed on held-out laptops. Open the underlying inputs to see which category indicators were active or absent.
 - **Across laptops** ranks features by their mean absolute contribution over the 258 held-out configurations. Use the sidebar to compare full predictions when evaluating a hardware change.
-- **Generate detailed buyer analysis** asks Gemini to expand the price analysis, hardware trade-offs, and negotiation strategy. It sends the listing inputs and valuation evidence to Google. The local report is available immediately.
+- **Generate detailed buyer analysis** keeps the price verdict and euros tied to the app’s calculations. Gemini adds context about hardware trade-offs and negotiation. It receives the listing inputs and valuation evidence. If Gemini is unavailable, the button still returns a complete report based on what you entered.
 
 For a quick demo, keep the default hardware, enter a €300 asking price, and enter €275, €310, and €340 as sample completed sales. The offer is €10 below their median. Choose **Modern gaming** to see how a competitive price can still be a poor match for the selected use.
 

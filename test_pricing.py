@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx2
+from google.genai import errors
 from matplotlib.figure import Figure
 
 from app import configure, main, st
@@ -115,31 +117,95 @@ class PricingTests(unittest.TestCase):
         coverage = sum(error <= threshold for error in errors) / len(errors)
         self.assertAlmostEqual(coverage, .9, delta=1 / len(errors))
 
+    def strategy_facts(self, ask=300):
+        return {
+            "asking_price_eur": ask,
+            "comparable_count": 0,
+            "selected_specs": {"Memory": "8 GB", "CPU model": "Intel Core i5 7200U 2.5GHz"},
+            "market_assessment": "Used-market value needs more evidence",
+            "price_evidence": "You entered 0 of the 3 comparable prices needed for a verdict.",
+            "catalog_estimate_eur": 1037.73,
+            "hardware_fit": "Suitable on paper for everyday work",
+            "hardware_details": "8 GB is a reasonable starting point for light multitasking.",
+            "purchase_action": "Factor in the worn battery",
+            "condition_checks": "Ask for a battery report and replacement quote.",
+            "pricing_next_step": "Find recent completed sales for the same specs and condition.",
+        }
+
     def test_gemini_report_stays_tied_to_the_listing(self):
-        body = {"valuation": "Price discussion", "hardware": "Hardware discussion", "strategy": "Purchase checks"}
+        body = {"hardware": "Hardware discussion", "strategy": "Purchase checks"}
         with patch.object(st, "secrets", {"GEMINI_API_KEY": "placeholder"}), \
              patch.object(st, "session_state", {}), patch.object(st, "button", side_effect=[True, False, False]), \
              patch("buyer_report.generate_strategy", return_value=body) as generate, patch.object(st, "text") as text:
             for ask in (300, 300, 310):
-                show_gemini_report({"asking": ask})
-            generate.assert_called_once_with("placeholder", {"asking": 300})
+                show_gemini_report(self.strategy_facts(ask))
+            generate.assert_called_once_with("placeholder", self.strategy_facts(300))
             self.assertEqual(text.call_count, 6)
+            self.assertIn("€300.00", text.call_args_list[0].args[0])
+            self.assertIn("0 of the 3 comparable prices", text.call_args_list[0].args[0])
 
-    def test_gemini_cannot_insert_new_digits_or_currencies(self):
-        paragraph = ("Compare the seller’s offer with recent completed sales and ask for a battery report "
-                     "before agreeing to pay.")
-        good = {section: paragraph for section in ("valuation", "hardware", "strategy")}
+    def test_gemini_keeps_valid_sections_with_exact_hardware_numbers(self):
+        hardware = "The Intel Core i5 and 8 GB of memory are suitable for light multitasking."
+        strategy = "Ask the seller for a battery report before agreeing to pay."
+        report = {"hardware": hardware, "strategy": strategy}
         with patch("buyer_report.genai.Client") as sdk:
             send = sdk.return_value.__enter__.return_value.models.generate_content
             send.side_effect = [
-                SimpleNamespace(text=json.dumps(good)),
-                SimpleNamespace(text=json.dumps(dict(good, strategy=paragraph + " Offer €50."))),
+                SimpleNamespace(text=json.dumps(dict(report, valuation="A price verdict from Gemini."))),
+                SimpleNamespace(text=json.dumps(dict(report, strategy=strategy + " Offer €50."))),
+                SimpleNamespace(text=json.dumps(dict(report, hardware=hardware.replace("8 GB", "32 GB")))),
                 SimpleNamespace(text="Not JSON"),
             ]
-            self.assertEqual(generate_strategy("placeholder", {}), good)
-            self.assertIsNone(generate_strategy("placeholder", {}))
-            self.assertIsNone(generate_strategy("placeholder", {}))
+            facts = self.strategy_facts()
+            self.assertEqual(generate_strategy("placeholder", facts), report)
+            self.assertEqual(generate_strategy("placeholder", facts), {"hardware": hardware})
+            self.assertEqual(generate_strategy("placeholder", facts), {"strategy": strategy})
+            self.assertEqual(generate_strategy("placeholder", facts), {})
             self.assertEqual(send.call_args.kwargs["config"].response_mime_type, "application/json")
+
+    def test_guidance_survives_invalid_replies_and_api_errors(self):
+        failures = [
+            ({}, "reply could not be used"),
+            ({"hardware": "Gemini hardware paragraph"}, "Some Gemini sections"),
+            (errors.APIError(503, {"error": {"message": "test"}}), "temporarily unavailable (HTTP 503)"),
+            (errors.APIError(429, {"error": {"message": "test"}}), "request limit was reached (HTTP 429)"),
+            (errors.APIError(403, {"error": {"message": "test"}}), "denied API access (HTTP 403)"),
+            (httpx2.ReadTimeout("test"), "could not be reached in time"),
+        ]
+        for outcome, note in failures:
+            with self.subTest(note=note), patch.object(st, "secrets", {"GEMINI_API_KEY": "placeholder"}), \
+                 patch.object(st, "session_state", {}), patch.object(st, "button", return_value=True), \
+                 patch("buyer_report.generate_strategy", side_effect=[outcome]), \
+                 patch.object(st, "caption") as caption, patch.object(st, "text") as text:
+                show_gemini_report(self.strategy_facts())
+                self.assertIn(note, caption.call_args.args[0])
+                self.assertEqual(text.call_count, 3)
+                self.assertIn("catalog estimate is a historical retail benchmark", text.call_args_list[0].args[0])
+                self.assertIn("battery report", text.call_args_list[2].args[0])
+
+    def test_sdk_retries_transient_errors_once_without_retrying_quota(self):
+        hardware = "The 8 GB of memory is suitable for browsing and light multitasking."
+        strategy = "Ask the seller for a battery report before agreeing to pay."
+        success = {"candidates": [{"finishReason": "STOP", "content": {
+            "role": "model", "parts": [{"text": json.dumps({"hardware": hardware, "strategy": strategy})}],
+        }}]}
+        for codes, expected_calls in [([503, 200], 2), ([503, 503], 2), ([429], 1)]:
+            with self.subTest(codes=codes):
+                remaining = iter(codes)
+
+                def send(client, request, **kwargs):
+                    code = next(remaining)
+                    body = success if code == 200 else {"error": {"code": code, "message": "test"}}
+                    return httpx2.Response(code, json=body, request=request)
+
+                with patch.object(httpx2.Client, "send", autospec=True, side_effect=send) as transport:
+                    if codes[-1] == 200:
+                        self.assertEqual(generate_strategy("placeholder", self.strategy_facts())["hardware"], hardware)
+                    else:
+                        with self.assertRaises(errors.APIError) as failure:
+                            generate_strategy("placeholder", self.strategy_facts())
+                        self.assertEqual(failure.exception.code, codes[-1])
+                    self.assertEqual(transport.call_count, expected_calls)
 
 
 if __name__ == "__main__":
